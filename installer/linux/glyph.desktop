@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Glyph
+GenericName=Markdown Editor
+Comment=A native Markdown editor for notes, code and diagrams
+Exec=glyph %F
+Icon=glyph
+Terminal=false
+Categories=Office;TextEditor;Utility;
+MimeType=text/markdown;text/x-markdown;
+Keywords=markdown;editor;notes;

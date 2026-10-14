@@ -8,7 +8,7 @@
 
 Rust · [gpui-fast](https://github.com/longbridge/gpui-fast) · one 9 MB executable · no browser engine · dark and light
 
-[Install](#install-on-windows) · [Build](#build-from-source) · [Shortcuts](#keyboard-map) · [Layout](#project-layout)
+[Install](#install) · [Build](#build-from-source) · [Shortcuts](#keyboard-map) · [Layout](#project-layout)
 
 <img src="docs/screenshot-split.png" alt="Glyph in split view: Markdown source on the left, native preview on the right" width="900">
 
@@ -39,7 +39,12 @@ them through the Mermaid CDN.
 <img src="docs/screenshot-light.png" alt="Glyph in read view with the light theme" width="900">
 </div>
 
-## Install on Windows
+## Install
+
+Prebuilt installers for Windows, macOS and Linux are on the
+[Releases](https://github.com/Master0fFate/glyph/releases) page.
+
+## Install from source on Windows
 
 ```powershell
 git clone https://github.com/Master0fFate/glyph.git
@@ -61,7 +66,7 @@ prompt appears. Uninstall from *Settings › Apps* or run
 defaults.
 
 `installer\glyph.iss` is an Inno Setup 6 script for building a conventional
-`GlyphSetup.exe` with the same associations.
+`Glyph-<version>-windows-setup.exe` with the same associations.
 
 ## Build from source
 
