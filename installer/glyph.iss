@@ -1,6 +1,6 @@
 
 #define AppName "Glyph"
-#define AppVersion "0.3.1"
+#define AppVersion "0.3.2"
 #define AppExe "glyph.exe"
 
 [Setup]
