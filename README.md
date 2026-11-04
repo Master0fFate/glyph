@@ -29,7 +29,7 @@ almost zero CPU, and ships as a single file.
 | **Window** | Custom frameless chrome with its own title bar, segmented Write / Split / Read control, light and dark themes |
 | **Editor** | Markdown-aware colouring, soft wrap, line numbers, list continuation, indent / outdent, duplicate / move / delete line, coalescing undo, find and replace, go to line, zoom |
 | **Preview** | Headings, paragraphs, lists, task lists, tables, block quotes, highlighted code blocks with a copy button, local raster images, clickable links. Scrolls with the editor; double-click a block to jump to its source |
-| **Workspace** | Sidebar with a Markdown file tree and a document outline, tabs, command palette, status bar, focus mode, session restore |
+| **Workspace** | Sidebar with an expandable Markdown tree, per-folder new-file `+` buttons, an in-app save-name prompt, a document outline, tabs, command palette, status bar, focus mode, session restore |
 | **Files** | UTF-8 with BOM and line-ending preservation, atomic saves, conflict detection, standalone HTML export |
 
 Mermaid blocks show their source in the native preview. The HTML export renders

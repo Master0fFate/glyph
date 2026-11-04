@@ -1567,6 +1567,7 @@ fn gutter_width(editor: &Editor) -> Pixels {
     if !editor.line_numbers {
         return px(0.);
     }
-    let digits = editor.buffer.line_count().to_string().len().max(2) as f32;
+    // Keep the gutter stable across tabs so switching documents never shifts the text.
+    let digits = editor.buffer.line_count().to_string().len().max(4) as f32;
     px(GUTTER_GAP) + editor.font_size * 0.86 * 0.62 * digits
 }

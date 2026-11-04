@@ -50,12 +50,15 @@ actions!(
 );
 
 const SIDEBAR_WIDTH: f32 = 260.0;
+const SIDEBAR_ROW_HEIGHT: f32 = 26.0;
 const TITLEBAR_HEIGHT: f32 = 44.0;
 
 struct Tab {
     id: usize,
     editor: Entity<Editor>,
     snapshot: Option<Snapshot>,
+    /// Folder targeted by an unsaved document created with a per-folder + button.
+    save_dir: Option<PathBuf>,
     title: String,
     document: Rc<Document>,
     parsed_version: Option<u64>,
@@ -70,12 +73,39 @@ impl Tab {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TabDrag(usize);
+
+struct TabDragPreview {
+    title: String,
+}
+
+impl Render for TabDragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.global::<Theme>().clone();
+        div()
+            .h(px(26.))
+            .px(px(10.))
+            .rounded(px(7.))
+            .bg(theme.card)
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_md()
+            .flex()
+            .items_center()
+            .text_size(px(12.5))
+            .text_color(theme.text)
+            .child(self.title.clone())
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Overlay {
     None,
     Find,
     GoToLine,
     Palette,
+    SaveName,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -150,6 +180,9 @@ pub struct Workspace {
     replace_input: Entity<Editor>,
     goto_input: Entity<Editor>,
     palette_input: Entity<Editor>,
+    save_name_input: Entity<Editor>,
+    save_name_tab: usize,
+    save_name_dir: PathBuf,
     palette_index: usize,
     notice: Option<(String, NoticeKind)>,
     notice_task: Option<Task<()>>,
@@ -165,6 +198,7 @@ impl Workspace {
         let replace_input = cx.new(|cx| Editor::single_line("Replace with", cx));
         let goto_input = cx.new(|cx| Editor::single_line("Line number", cx));
         let palette_input = cx.new(|cx| Editor::single_line("Type a command", cx));
+        let save_name_input = cx.new(|cx| Editor::single_line("File name", cx));
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(&find_input, window, |this, _, event, window, cx| match event {
             EditorEvent::Edited => this.update_search(cx),
@@ -193,6 +227,11 @@ impl Workspace {
             EditorEvent::Cancel => this.close_overlay(&CloseOverlay, window, cx),
             _ => {}
         }));
+        subscriptions.push(cx.subscribe_in(&save_name_input, window, |this, _, event, window, cx| match event {
+            EditorEvent::Submit => this.submit_save_name(window, cx),
+            EditorEvent::Cancel => this.close_overlay(&CloseOverlay, window, cx),
+            _ => {}
+        }));
         let mut workspace = Self {
             tabs: Vec::new(),
             active: 0,
@@ -216,6 +255,9 @@ impl Workspace {
             replace_input,
             goto_input,
             palette_input,
+            save_name_input,
+            save_name_tab: 0,
+            save_name_dir: PathBuf::new(),
             palette_index: 0,
             notice: None,
             notice_task: None,
@@ -292,7 +334,7 @@ impl Workspace {
             _ => {}
         });
         let document = Rc::new(markdown::parse(text));
-        self.tabs.push(Tab { id, editor, snapshot, title, document, parsed_version: Some(0), word_count: 0, word_count_version: None, _subscription: subscription });
+        self.tabs.push(Tab { id, editor, snapshot, save_dir: None, title, document, parsed_version: Some(0), word_count: 0, word_count_version: None, _subscription: subscription });
         self.tabs.len() - 1
     }
 
@@ -414,7 +456,16 @@ impl Workspace {
     }
 
     fn new_document(&mut self, _: &NewDocument, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.files.root().map(Path::to_path_buf);
         let ix = self.add_tab("Untitled".to_owned(), "", None, window, cx);
+        self.tabs[ix].save_dir = dir;
+        self.activate_tab(ix, window, cx);
+    }
+
+    fn new_document_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.files.expand(&dir);
+        let ix = self.add_tab("Untitled".to_owned(), "", None, window, cx);
+        self.tabs[ix].save_dir = Some(dir);
         self.activate_tab(ix, window, cx);
     }
 
@@ -443,6 +494,7 @@ impl Workspace {
                     this.files.set_root(folder);
                     this.sidebar_open = true;
                     this.sidebar_tab = SidebarTab::Files;
+                    this.scroll_sidebar_to_top();
                     cx.notify();
                 })
                 .ok();
@@ -462,7 +514,7 @@ impl Workspace {
             return;
         };
         let Some(snapshot) = self.tabs[ix].snapshot.clone() else {
-            self.save_tab_as(id, window, cx);
+            self.open_save_name_prompt(id, window, cx);
             return;
         };
         let text = self.tabs[ix].editor.read(cx).text();
@@ -495,56 +547,81 @@ impl Workspace {
 
     fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.active_tab() {
-            self.save_tab_as(tab.id, window, cx);
+            let id = tab.id;
+            self.open_save_name_prompt(id, window, cx);
         }
     }
 
-    fn save_tab_as(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_save_name_prompt(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
             return;
         };
         let directory = tab
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.path.parent().map(Path::to_path_buf))
+            .save_dir
+            .clone()
+            .or_else(|| tab.snapshot.as_ref().and_then(|s| s.path.parent().map(Path::to_path_buf)))
             .or_else(|| self.files.root().map(Path::to_path_buf))
             .or_else(|| directories::UserDirs::new().and_then(|d| d.document_dir().map(Path::to_path_buf)))
             .unwrap_or_else(|| PathBuf::from("."));
-        let suggested = if tab.snapshot.is_some() { tab.title.clone() } else { format!("{}.md", tab.title.to_lowercase().replace(' ', "-")) };
-        let receiver = cx.prompt_for_new_path(&directory, Some(&suggested));
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(path))) = receiver.await {
-                this.update_in(cx, |this, _, cx| this.finish_save_as(id, path, cx)).ok();
-            }
-        })
-        .detach();
+        let suggested = tab.snapshot.as_ref().and_then(|s| s.path.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.save_name_tab = id;
+        self.save_name_dir = directory;
+        self.save_name_input.update(cx, |input, cx| input.replace_all_text(&suggested, cx));
+        self.open_overlay(Overlay::SaveName, window, cx);
     }
 
-    fn finish_save_as(&mut self, id: usize, path: PathBuf, cx: &mut Context<Self>) {
-        let Some(ix) = self.tabs.iter().position(|t| t.id == id) else {
+    fn submit_save_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let raw = self.save_name_input.read(cx).text();
+        let mut name = raw.trim().trim_matches('"').trim().to_owned();
+        if name.is_empty() {
+            name = "untitled".to_owned();
+        }
+        if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+            self.show_notice("Use a plain file name without folders.".to_owned(), NoticeKind::Error, cx);
+            return;
+        }
+        let has_extension = Path::new(&name).extension().is_some_and(|extension| !extension.is_empty());
+        if !has_extension {
+            while name.ends_with('.') {
+                name.pop();
+            }
+            name.push_str(".txt");
+        }
+        let path = self.save_name_dir.join(&name);
+        if path.exists() {
+            self.show_notice(format!("{name} already exists in this folder."), NoticeKind::Error, cx);
+            return;
+        }
+        let Some(ix) = self.tabs.iter().position(|t| t.id == self.save_name_tab) else {
+            self.close_overlay(&CloseOverlay, window, cx);
             return;
         };
-        let path = if path.extension().is_none() { path.with_extension("md") } else { path };
         let text = self.tabs[ix].editor.read(cx).text();
         match save_new(&path, &text) {
             Ok(snapshot) => {
-                self.tabs[ix].title = snapshot.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                self.tabs[ix].snapshot = Some(snapshot);
+                self.tabs[ix].title = snapshot.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| name.clone());
+                self.tabs[ix].snapshot = Some(snapshot.clone());
+                self.tabs[ix].save_dir = None;
                 self.tabs[ix].editor.update(cx, |editor, cx| {
                     editor.buffer.mark_saved();
                     cx.notify();
                 });
                 if self.files.root().is_none()
-                    && let Some(parent) = path.parent()
+                    && let Some(parent) = snapshot.path.parent()
                 {
                     self.files.set_root(parent.to_path_buf());
                 }
                 self.files.refresh();
-                self.show_notice(format!("Saved {}", self.tabs[ix].title), NoticeKind::Info, cx);
+                let title = self.tabs[ix].title.clone();
+                self.close_overlay(&CloseOverlay, window, cx);
+                if let Some(entry) = self.files.reveal(&snapshot.path) {
+                    self.file_scroll.scroll_to_item(entry, ScrollStrategy::Center);
+                }
+                window.set_window_title(&format!("{title} — Glyph"));
+                self.show_notice(format!("Saved {title}"), NoticeKind::Info, cx);
             }
             Err(error) => self.show_notice(format!("{error:#}"), NoticeKind::Error, cx),
         }
-        cx.notify();
     }
 
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -594,6 +671,27 @@ impl Workspace {
     fn previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
         let count = self.tabs.len().max(1);
         self.activate_tab((self.active + count - 1) % count, window, cx);
+    }
+
+    fn reorder_tab(&mut self, dragged_id: usize, target_id: usize, cx: &mut Context<Self>) {
+        if dragged_id == target_id {
+            return;
+        }
+        let (Some(from), Some(to)) = (
+            self.tabs.iter().position(|t| t.id == dragged_id),
+            self.tabs.iter().position(|t| t.id == target_id),
+        ) else {
+            return;
+        };
+        let active_id = self.tabs.get(self.active).map(|t| t.id);
+        let tab = self.tabs.remove(from);
+        let target = self.tabs.iter().position(|t| t.id == target_id).unwrap_or(0);
+        let insert = if from < to { target + 1 } else { target };
+        self.tabs.insert(insert.min(self.tabs.len()), tab);
+        if let Some(active_id) = active_id {
+            self.active = self.tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
+        }
+        cx.notify();
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -654,6 +752,7 @@ impl Workspace {
             Overlay::Find => Some(&self.find_input),
             Overlay::GoToLine => Some(&self.goto_input),
             Overlay::Palette => Some(&self.palette_input),
+            Overlay::SaveName => Some(&self.save_name_input),
             Overlay::None => None,
         };
         if let Some(input) = input {
@@ -875,6 +974,12 @@ impl Workspace {
             cx.notify();
         } else {
             self.open_path(&entry.path, window, cx);
+        }
+    }
+
+    fn scroll_sidebar_to_top(&self) {
+        if !self.files.entries().is_empty() {
+            self.file_scroll.scroll_to_item(0, ScrollStrategy::Top);
         }
     }
 
@@ -1108,13 +1213,21 @@ impl Workspace {
                     .cursor_pointer()
                     .text_size(px(12.5))
                     .text_color(if selected { theme.text } else { theme.muted })
-                    .when(selected, |this| this.bg(theme.raised).border_1().border_color(theme.border))
+                    .border_1()
+                    .border_color(if selected { theme.border } else { theme.shell })
+                    .when(selected, |this| this.bg(theme.raised))
                     .hover(|this| this.bg(theme.hover))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(ix) = this.tabs.iter().position(|t| t.id == id) {
                             this.activate_tab(ix, window, cx);
                         }
                     }))
+                    .on_drag(TabDrag(id), {
+                        let title = tab.title.clone();
+                        move |_: &TabDrag, _, _, cx| cx.new(|_| TabDragPreview { title: title.clone() })
+                    })
+                    .can_drop(|dragged, _, _| dragged.is::<TabDrag>())
+                    .on_drop::<TabDrag>(cx.listener(move |this, dragged: &TabDrag, _, cx| this.reorder_tab(dragged.0, id, cx)))
                     .child(div().max_w(px(180.)).truncate().child(tab.title.clone()))
                     .child(
                         div()
@@ -1151,6 +1264,7 @@ impl Workspace {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<Theme>().clone();
         let root_name = self.files.root().and_then(|r| r.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "No folder".to_owned());
+        let root_dir = self.files.root().map(Path::to_path_buf);
         let this = cx.entity();
         let tab_button = |label: &'static str, tab: SidebarTab, icon: &'static str| {
             let selected = self.sidebar_tab == tab;
@@ -1178,12 +1292,59 @@ impl Workspace {
         let list: AnyElement = match self.sidebar_tab {
             SidebarTab::Files => {
                 let count = self.files.entries().len();
-                if count == 0 {
+                if self.files.root().is_none() {
+                    let mut empty = div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(7.))
+                        .px(px(22.))
+                        .child(
+                            div()
+                                .size(px(40.))
+                                .rounded(px(11.))
+                                .bg(theme.raised)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(svg().path("icons/folder.svg").size(px(19.)).text_color(theme.faint)),
+                        )
+                        .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child("No folder open"))
+                        .child(div().text_size(px(11.5)).text_color(theme.faint).text_center().child("Choose a folder of Markdown notes to get started."));
+                    empty = empty.child(
+                        div()
+                            .id("select-folder-empty")
+                            .mt(px(5.))
+                            .h(px(28.))
+                            .px(px(12.))
+                            .rounded(px(7.))
+                            .bg(theme.accent)
+                            .text_color(theme.on_accent)
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .cursor_pointer()
+                            .hover(|this| this.opacity(0.9))
+                            .on_click(cx.listener(|this, _, window, cx| this.open_folder(&OpenFolder, window, cx)))
+                            .child(svg().path("icons/folder.svg").size(px(13.)).text_color(theme.on_accent))
+                            .child("Select folder"),
+                    );
+                    empty.into_any_element()
+                } else if count == 0 {
                     div()
-                        .p(px(14.))
-                        .text_size(px(12.5))
-                        .text_color(theme.faint)
-                        .child(if self.files.root().is_some() { "No Markdown files here." } else { "Open a folder to browse its Markdown files." })
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(6.))
+                        .px(px(22.))
+                        .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child("No notes here yet"))
+                        .child(div().text_size(px(11.5)).text_color(theme.faint).text_center().child("Click + on the folder to create one."))
                         .into_any_element()
                 } else {
                     uniform_list("files", count, move |range, _, cx| {
@@ -1191,31 +1352,67 @@ impl Workspace {
                         range
                             .filter_map(|ix| workspace.files.entries().get(ix).map(|e| (ix, e.clone())))
                             .map(|(ix, entry)| {
-                                let open = workspace.active_tab().and_then(|t| t.snapshot.as_ref()).is_some_and(|s| s.path == entry.path);
+                                let open = !entry.is_dir && workspace.active_tab().and_then(|t| t.snapshot.as_ref()).is_some_and(|s| s.path == entry.path);
+                                let dirty = !entry.is_dir && workspace.tabs.iter().any(|t| t.snapshot.as_ref().is_some_and(|s| s.path == entry.path) && t.dirty(cx));
                                 let handle = this.clone();
-                                let icon = if entry.is_dir {
+                                let new_handle = this.clone();
+                                let new_dir = entry.path.clone();
+                                let chevron = if entry.is_dir {
                                     if entry.expanded { "chevron-down" } else { "chevron-right" }
                                 } else {
                                     "file"
                                 };
-                                div()
-                                    .id(("file", ix))
-                                    .h(px(28.))
+                                let row = div()
+                                    .id(("entry", ix))
+                                    .w(px(SIDEBAR_WIDTH - 12.))
+                                    .h(px(SIDEBAR_ROW_HEIGHT))
                                     .mx(px(6.))
-                                    .pl(px(8. + entry.depth as f32 * 14.))
-                                    .pr(px(8.))
+                                    .pl(px(4. + entry.depth as f32 * 14.))
+                                    .pr(px(4.))
                                     .rounded(px(6.))
                                     .flex()
                                     .items_center()
-                                    .gap(px(6.))
+                                    .gap(px(4.))
                                     .cursor_pointer()
                                     .text_size(px(12.5))
                                     .text_color(if open { theme.text } else { theme.muted })
                                     .when(open, |this| this.bg(theme.active))
                                     .hover(|this| this.bg(theme.hover))
                                     .on_click(move |_, window, cx| handle.update(cx, |ws, cx| ws.file_clicked(ix, window, cx)))
-                                    .child(svg().path(format!("icons/{icon}.svg")).size(px(13.)).text_color(if entry.is_dir { theme.faint } else { theme.accent.alpha(0.8) }))
-                                    .child(div().truncate().child(entry.name))
+                                    .child(if entry.is_dir {
+                                        svg().path(format!("icons/{chevron}.svg")).size(px(12.)).text_color(theme.faint).into_any_element()
+                                    } else {
+                                        div().size(px(12.)).into_any_element()
+                                    })
+                                    .child(svg().path(if entry.is_dir { "icons/folder.svg" } else { "icons/file.svg" }).size(px(13.)).text_color(if entry.is_dir { theme.faint } else { theme.accent.alpha(0.8) }))
+                                    .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()));
+                                if entry.is_dir {
+                                    row.child(
+                                        div()
+                                            .id(("new-file", ix))
+                                            .size(px(20.))
+                                            .rounded(px(5.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .hover(|this| this.bg(theme.raised))
+                                            .on_click(move |_, window, cx| {
+                                                cx.stop_propagation();
+                                                new_handle.update(cx, |ws, cx| ws.new_document_in(new_dir.clone(), window, cx));
+                                            })
+                                            .child(svg().path("icons/plus.svg").size(px(12.)).text_color(theme.faint)),
+                                    )
+                                } else {
+                                    row.child(
+                                        div()
+                                            .size(px(20.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .when(dirty, |this| this.child(div().size(px(6.)).rounded_full().bg(theme.accent))),
+                                    )
+                                }
                             })
                             .collect()
                     })
@@ -1270,17 +1467,48 @@ impl Workspace {
             .bg(theme.shell)
             .border_r_1()
             .border_color(theme.border)
-            .child(
-                div()
+            .child(match self.sidebar_tab {
+                SidebarTab::Outline => div()
+                    .h(px(38.))
+                    .px(px(14.))
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .px(px(12.))
-                    .pt(px(12.))
-                    .pb(px(6.))
-                    .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted).truncate().child(root_name))
-                    .child(self.icon_button("open-folder", "folder", "Open folder", false, &theme).size(px(26.)).on_click(cx.listener(|this, _, window, cx| this.open_folder(&OpenFolder, window, cx)))),
-            )
+                    .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted).child("Outline"))
+                    .into_any_element(),
+                SidebarTab::Files => {
+                    let mut header = div().h(px(34.)).px(px(10.)).flex().items_center().gap(px(2.))
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted).child(root_name));
+                    header = header.child(
+                        div()
+                            .id("open-folder")
+                            .size(px(22.))
+                            .rounded(px(5.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(theme.hover))
+                            .on_click(cx.listener(|this, _, window, cx| this.open_folder(&OpenFolder, window, cx)))
+                            .child(svg().path("icons/folder.svg").size(px(13.)).text_color(theme.faint)),
+                    );
+                    if let Some(dir) = root_dir {
+                        header = header.child(
+                            div()
+                                .id("new-file-root")
+                                .size(px(22.))
+                                .rounded(px(5.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .hover(|this| this.bg(theme.hover))
+                                .on_click(cx.listener(move |this, _, window, cx| this.new_document_in(dir.clone(), window, cx)))
+                                .child(svg().path("icons/plus.svg").size(px(12.)).text_color(theme.faint)),
+                        );
+                    }
+                    header.into_any_element()
+                }
+            })
             .child(
                 div()
                     .mx(px(10.))
@@ -1486,11 +1714,13 @@ impl Workspace {
         let selected = self.palette_index.min(commands.len().saturating_sub(1));
         div()
             .id("palette-backdrop")
+            .occlude()
             .absolute()
             .inset_0()
             .bg(gpui::black().alpha(if theme.appearance == crate::theme::Appearance::Dark { 0.45 } else { 0.2 }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_overlay(&CloseOverlay, window, cx)))
             .flex()
+            .items_start()
             .justify_center()
             .pt(px(110.))
             .child(
@@ -1553,10 +1783,12 @@ impl Workspace {
         let lines = self.active_editor().map(|e| e.read(cx).buffer.line_count()).unwrap_or(1);
         div()
             .id("goto-backdrop")
+            .occlude()
             .absolute()
             .inset_0()
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_overlay(&CloseOverlay, window, cx)))
             .flex()
+            .items_start()
             .justify_center()
             .pt(px(110.))
             .child(
@@ -1585,6 +1817,89 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .child(div().flex_1().min_w_0().child(self.goto_input.clone())),
+                    ),
+            )
+    }
+
+    fn render_save_name(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.global::<Theme>().clone();
+        let dir = self.save_name_dir.to_string_lossy().into_owned();
+        div()
+            .id("save-name-backdrop")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_overlay(&CloseOverlay, window, cx)))
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(110.))
+            .child(
+                div()
+                    .id("save-name-card")
+                    .w(px(400.))
+                    .rounded(px(12.))
+                    .bg(theme.card)
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .shadow_lg()
+                    .p(px(14.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(9.))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child("Save file"))
+                    .child(div().text_size(px(11.)).text_color(theme.faint).truncate().child(format!("Saving to {dir}")))
+                    .child(
+                        div()
+                            .h(px(34.))
+                            .px(px(10.))
+                            .rounded(px(8.))
+                            .bg(theme.background)
+                            .border_1()
+                            .border_color(theme.accent)
+                            .flex()
+                            .items_center()
+                            .child(div().flex_1().min_w_0().child(self.save_name_input.clone())),
+                    )
+                    .child(div().text_size(px(11.)).text_color(theme.faint).child("No extension means .txt. Use .md for Markdown."))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .id("save-name-cancel")
+                                    .h(px(28.))
+                                    .px(px(11.))
+                                    .rounded(px(7.))
+                                    .flex()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .text_size(px(12.))
+                                    .text_color(theme.muted)
+                                    .hover(|this| this.bg(theme.hover))
+                                    .on_click(cx.listener(|this, _, window, cx| this.close_overlay(&CloseOverlay, window, cx)))
+                                    .child("Cancel"),
+                            )
+                            .child(
+                                div()
+                                    .id("save-name-confirm")
+                                    .h(px(28.))
+                                    .px(px(11.))
+                                    .rounded(px(7.))
+                                    .bg(theme.accent)
+                                    .text_color(theme.on_accent)
+                                    .flex()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .hover(|this| this.opacity(0.9))
+                                    .on_click(cx.listener(|this, _, window, cx| this.submit_save_name(window, cx)))
+                                    .child("Save"),
+                            ),
                     ),
             )
     }
@@ -1686,7 +2001,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::close_overlay))
             .child(self.render_titlebar(window, cx));
-        if self.tabs.len() > 1 && show_chrome {
+        if show_chrome {
             root = root.child(self.render_tabs(cx));
         }
         root = root.child(body);
@@ -1696,6 +2011,7 @@ impl Render for Workspace {
         match self.overlay {
             Overlay::Palette => root = root.child(self.render_palette(cx)),
             Overlay::GoToLine => root = root.child(self.render_goto(cx)),
+            Overlay::SaveName => root = root.child(self.render_save_name(cx)),
             _ => {}
         }
         if let Some(notice) = self.render_notice(cx) {

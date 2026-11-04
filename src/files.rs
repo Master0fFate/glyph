@@ -1,4 +1,4 @@
-use crate::document::is_text_document;
+use crate::document::{canonical, is_text_document};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ pub struct Entry {
     pub expanded: bool,
 }
 
+/// An expandable tree rooted at the workspace folder.
 #[derive(Default)]
 pub struct FileTree {
     root: Option<PathBuf>,
@@ -31,7 +32,7 @@ impl FileTree {
     }
 
     pub fn set_root(&mut self, root: PathBuf) {
-        self.root = Some(root);
+        self.root = Some(canonical(&root));
         self.expanded.clear();
         self.rebuild();
     }
@@ -51,6 +52,12 @@ impl FileTree {
             self.expanded.insert(entry.path.clone());
         }
         self.rebuild();
+    }
+
+    pub fn expand(&mut self, dir: &Path) {
+        if self.expanded.insert(dir.to_path_buf()) {
+            self.rebuild();
+        }
     }
 
     pub fn reveal(&mut self, path: &Path) -> Option<usize> {
@@ -78,29 +85,7 @@ impl FileTree {
     }
 
     fn walk(&mut self, dir: &Path, depth: usize) {
-        let Ok(read) = fs::read_dir(dir) else {
-            return;
-        };
-        let mut children: Vec<(bool, String, PathBuf)> = read
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    return None;
-                }
-                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                if is_dir && SKIPPED_DIRS.contains(&name.as_str()) {
-                    return None;
-                }
-                if !is_dir && !is_text_document(&path) {
-                    return None;
-                }
-                Some((is_dir, name, path))
-            })
-            .collect();
-        children.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
-        for (is_dir, name, path) in children {
+        for (is_dir, name, path) in children(dir) {
             let expanded = is_dir && self.expanded.contains(&path);
             self.entries.push(Entry { path: path.clone(), name, depth, is_dir, expanded });
             if expanded {
@@ -108,4 +93,30 @@ impl FileTree {
             }
         }
     }
+}
+
+fn children(dir: &Path) -> Vec<(bool, String, PathBuf)> {
+    let Ok(read) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut children: Vec<(bool, String, PathBuf)> = read
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                return None;
+            }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir && SKIPPED_DIRS.contains(&name.as_str()) {
+                return None;
+            }
+            if !is_dir && !is_text_document(&path) {
+                return None;
+            }
+            Some((is_dir, name, path))
+        })
+        .collect();
+    children.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    children
 }
