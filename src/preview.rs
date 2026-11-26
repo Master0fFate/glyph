@@ -22,6 +22,9 @@ pub struct PreviewContext {
 }
 
 const BASE_SIZE: f32 = 15.5;
+const TABLE_CELL_MIN_WIDTH: f32 = 56.;
+const TABLE_CELL_MIN_WIDTH_CAP: f32 = 96.;
+const TABLE_CELL_PADDING: f32 = 12.;
 const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
 
 impl PreviewContext {
@@ -129,37 +132,57 @@ impl PreviewContext {
             .into_any_element()
     }
 
-    fn table(&self, header: &[RichText], rows: &[Vec<RichText>], aligns: &[Align]) -> gpui::Div {
+    fn table(&self, header: &[RichText], rows: &[Vec<RichText>], aligns: &[Align]) -> gpui::Stateful<gpui::Div> {
         let theme = &self.theme;
         let columns = header.len().max(rows.iter().map(|r| r.len()).max().unwrap_or(0)).max(1);
-        let align = |ix: usize| aligns.get(ix).copied().unwrap_or(Align::Left);
-        let row = |cells: &[RichText], head: bool| {
-            let mut row = div().flex().w_full().border_b_1().border_color(theme.border);
-            if head {
-                row = row.bg(theme.raised);
+        let mut widths = vec![TABLE_CELL_MIN_WIDTH; columns];
+        for cells in std::iter::once(header).chain(rows.iter().map(Vec::as_slice)) {
+            for (width, cell) in widths.iter_mut().zip(cells) {
+                let text_width = cell.text.chars().take(48).count() as f32 * 7.5;
+                *width = width.max(text_width + TABLE_CELL_PADDING * 2.);
             }
-            row.children((0..columns).map(|ix| {
-                let mut cell = div().flex_1().min_w_0().px_3().py_2().text_size(px(14.));
-                cell = match align(ix) {
-                    Align::Left => cell.text_left(),
-                    Align::Center => cell.text_center(),
-                    Align::Right => cell.text_right(),
-                };
-                let weight = if head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL };
-                match cells.get(ix) {
-                    Some(text) => cell.child(self.rich(text, px(14.), theme.text, weight)),
-                    None => cell,
-                }
-            }))
+        }
+        let min_cell_width = |width: f32| width.min(TABLE_CELL_MIN_WIDTH_CAP);
+        let min_table_width = widths.iter().copied().map(min_cell_width).sum::<f32>() + 2.;
+        let show_header = rows.is_empty() || header.iter().any(|cell| !cell.is_empty());
+        let row = |cells: &[RichText], head: bool, last: bool| {
+            let weight = if head { FontWeight::SEMIBOLD } else { FontWeight::NORMAL };
+            div()
+                .flex()
+                .w_full()
+                .when(!last, |row| row.border_b_1().border_color(theme.border))
+                .when(head, |row| row.bg(theme.raised))
+                .children(widths.iter().enumerate().map(|(ix, &width)| {
+                    let cell = div()
+                        .flex_basis(px(width))
+                        .flex_grow_1()
+                        .min_w(px(min_cell_width(width)))
+                        .px(px(TABLE_CELL_PADDING))
+                        .py_2();
+                    let cell = match aligns.get(ix).copied().unwrap_or(Align::Left) {
+                        Align::Left => cell.text_left(),
+                        Align::Center => cell.text_center(),
+                        Align::Right => cell.text_right(),
+                    };
+                    cell.when_some(cells.get(ix), |cell, text| cell.child(self.rich(text, px(14.), theme.text, weight)))
+                }))
         };
         div()
             .w_full()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(theme.border)
-            .overflow_hidden()
-            .child(row(header, true))
-            .children(rows.iter().map(|cells| row(cells, false)))
+            .id(self.next_id("table"))
+            .overflow_x_scroll()
+            .restrict_scroll_to_axis()
+            .child(
+                div()
+                    .w_full()
+                    .min_w(px(min_table_width))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .overflow_hidden()
+                    .when(show_header, |table| table.child(row(header, true, rows.is_empty())))
+                    .children(rows.iter().enumerate().map(|(ix, cells)| row(cells, false, ix + 1 == rows.len()))),
+            )
     }
 
     fn image(&self, alt: &str, src: &str) -> gpui::Div {

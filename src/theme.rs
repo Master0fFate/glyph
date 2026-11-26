@@ -77,7 +77,7 @@ impl Theme {
                 muted: rgb(0xa9a9ae).into(),
                 faint: rgb(0x6f6f76).into(),
                 accent: rgb(0x8b7cf6).into(),
-                on_accent: rgb(0xffffff).into(),
+                on_accent: rgb(0x111114).into(),
                 selection: rgba(0x8b7cf64d).into(),
                 cursor: rgb(0xb3a7ff).into(),
                 current_line: rgba(0xffffff07).into(),
