@@ -6,8 +6,8 @@ use crate::preview::PreviewContext;
 use crate::settings::{Layout, Settings};
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton, PathPromptOptions, PromptLevel,
-    ScrollHandle, ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window, WindowBounds,
+    AnyElement, App, Context, ElementId, Entity, FocusHandle, Focusable, FontWeight, MouseButton, PathPromptOptions,
+    PromptLevel, ScrollHandle, ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window, WindowBounds,
     WindowControlArea, actions, div, prelude::*, px, svg, uniform_list,
 };
 use std::path::{Path, PathBuf};
@@ -50,7 +50,7 @@ actions!(
 );
 
 const SIDEBAR_WIDTH: f32 = 260.0;
-const SIDEBAR_ROW_HEIGHT: f32 = 26.0;
+const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
 const TITLEBAR_HEIGHT: f32 = 44.0;
 
 struct Tab {
@@ -96,6 +96,26 @@ impl Render for TabDragPreview {
             .text_size(px(12.5))
             .text_color(theme.text)
             .child(self.title.clone())
+    }
+}
+
+struct IconTooltip(&'static str);
+
+impl Render for IconTooltip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.global::<Theme>();
+        div()
+            .px_2()
+            .py_1()
+            .rounded(px(6.))
+            .bg(theme.card)
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_sm()
+            .font_family(theme.sans.clone())
+            .text_size(px(12.))
+            .text_color(theme.text)
+            .child(self.0)
     }
 }
 
@@ -1062,11 +1082,11 @@ impl Focusable for Workspace {
 }
 
 impl Workspace {
-    fn icon_button(&self, id: &'static str, icon: &'static str, tooltip: &'static str, active: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-        let _ = tooltip;
+    fn icon_button(id: impl Into<ElementId>, icon: &'static str, tooltip: &'static str, size: f32, active: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
-            .size(px(30.))
+            .size(px(size))
+            .flex_shrink_0()
             .rounded(px(8.))
             .flex()
             .items_center()
@@ -1074,6 +1094,10 @@ impl Workspace {
             .cursor_pointer()
             .when(active, |this| this.bg(theme.active))
             .hover(|this| this.bg(theme.hover))
+            .active(|this| this.bg(theme.active))
+            .role(gpui::Role::Button)
+            .aria_label(tooltip)
+            .tooltip(move |_, cx| cx.new(|_| IconTooltip(tooltip)).into())
             .child(svg().path(format!("icons/{icon}.svg")).size(px(16.)).text_color(if active { theme.accent } else { theme.muted }))
     }
 
@@ -1140,7 +1164,7 @@ impl Workspace {
                     .items_center()
                     .gap(px(6.))
                     .pl(px(10.))
-                    .child(self.icon_button("toggle-sidebar", "sidebar", "Sidebar", self.sidebar_open && !self.focus_mode, &theme).on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx))))
+                    .child(Self::icon_button("toggle-sidebar", "sidebar", "Toggle sidebar", 32., self.sidebar_open && !self.focus_mode, &theme).on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx))))
                     .child(
                         div()
                             .h(px(TITLEBAR_HEIGHT))
@@ -1175,8 +1199,8 @@ impl Workspace {
                     .items_center()
                     .gap(px(2.))
                     .pr(px(8.))
-                    .child(self.icon_button("palette", "command", "Command palette", false, &theme).on_click(cx.listener(|this, _, window, cx| this.command_palette(&CommandPalette, window, cx))))
-                    .child(self.icon_button("theme", if dark { "sun" } else { "moon" }, "Theme", false, &theme).on_click(cx.listener(|this, _, window, cx| this.toggle_theme(&ToggleTheme, window, cx)))),
+                    .child(Self::icon_button("palette", "command", "Command palette", 32., false, &theme).on_click(cx.listener(|this, _, window, cx| this.command_palette(&CommandPalette, window, cx))))
+                    .child(Self::icon_button("theme", if dark { "sun" } else { "moon" }, if dark { "Switch to light theme" } else { "Switch to dark theme" }, 32., false, &theme).on_click(cx.listener(|this, _, window, cx| this.toggle_theme(&ToggleTheme, window, cx)))),
             )
             .child(div().w(px(1.)).h(px(18.)).bg(theme.border))
             .child(control("win-min", "minus", WindowControlArea::Min, false))
@@ -1286,54 +1310,40 @@ impl Workspace {
                     this.sidebar_tab = tab;
                     cx.notify();
                 }))
-                .child(svg().path(format!("icons/{icon}.svg")).size(px(12.)).text_color(if selected { theme.accent } else { theme.faint }))
+                .child(svg().path(format!("icons/{icon}.svg")).size(px(12.)).text_color(if selected { theme.accent } else { theme.muted }))
                 .child(label)
         };
         let list: AnyElement = match self.sidebar_tab {
             SidebarTab::Files => {
                 let count = self.files.entries().len();
                 if self.files.root().is_none() {
-                    let mut empty = div()
+                    div()
                         .size_full()
                         .flex()
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .gap(px(7.))
-                        .px(px(22.))
+                        .gap_3()
+                        .px_5()
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child("No folder open"))
                         .child(
                             div()
-                                .size(px(40.))
-                                .rounded(px(11.))
-                                .bg(theme.raised)
+                                .id("select-folder-empty")
+                                .h(px(32.))
+                                .px_3()
+                                .rounded(px(7.))
+                                .bg(theme.accent)
+                                .text_color(theme.on_accent)
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM)
                                 .flex()
                                 .items_center()
-                                .justify_center()
-                                .child(svg().path("icons/folder.svg").size(px(19.)).text_color(theme.faint)),
+                                .cursor_pointer()
+                                .hover(|this| this.bg(theme.accent.blend(theme.text.alpha(0.08))))
+                                .on_click(cx.listener(|this, _, window, cx| this.open_folder(&OpenFolder, window, cx)))
+                                .child("Open folder"),
                         )
-                        .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child("No folder open"))
-                        .child(div().text_size(px(11.5)).text_color(theme.faint).text_center().child("Choose a folder of Markdown notes to get started."));
-                    empty = empty.child(
-                        div()
-                            .id("select-folder-empty")
-                            .mt(px(5.))
-                            .h(px(28.))
-                            .px(px(12.))
-                            .rounded(px(7.))
-                            .bg(theme.accent)
-                            .text_color(theme.on_accent)
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .cursor_pointer()
-                            .hover(|this| this.opacity(0.9))
-                            .on_click(cx.listener(|this, _, window, cx| this.open_folder(&OpenFolder, window, cx)))
-                            .child(svg().path("icons/folder.svg").size(px(13.)).text_color(theme.on_accent))
-                            .child("Select folder"),
-                    );
-                    empty.into_any_element()
+                        .into_any_element()
                 } else if count == 0 {
                     div()
                         .size_full()
@@ -1341,13 +1351,14 @@ impl Workspace {
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .gap(px(6.))
-                        .px(px(22.))
-                        .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child("No notes here yet"))
-                        .child(div().text_size(px(11.5)).text_color(theme.faint).text_center().child("Click + on the folder to create one."))
+                        .gap_2()
+                        .px_5()
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child("No notes yet"))
+                        .child(div().text_size(px(12.)).text_color(theme.muted).text_center().child("Use + to create a note"))
                         .into_any_element()
                 } else {
                     uniform_list("files", count, move |range, _, cx| {
+                        let theme = cx.global::<Theme>();
                         let workspace = this.read(cx);
                         range
                             .filter_map(|ix| workspace.files.entries().get(ix).map(|e| (ix, e.clone())))
@@ -1357,11 +1368,7 @@ impl Workspace {
                                 let handle = this.clone();
                                 let new_handle = this.clone();
                                 let new_dir = entry.path.clone();
-                                let chevron = if entry.is_dir {
-                                    if entry.expanded { "chevron-down" } else { "chevron-right" }
-                                } else {
-                                    "file"
-                                };
+                                let chevron = if entry.expanded { "chevron-down" } else { "chevron-right" };
                                 let row = div()
                                     .id(("entry", ix))
                                     .w(px(SIDEBAR_WIDTH - 12.))
@@ -1380,33 +1387,25 @@ impl Workspace {
                                     .hover(|this| this.bg(theme.hover))
                                     .on_click(move |_, window, cx| handle.update(cx, |ws, cx| ws.file_clicked(ix, window, cx)))
                                     .child(if entry.is_dir {
-                                        svg().path(format!("icons/{chevron}.svg")).size(px(12.)).text_color(theme.faint).into_any_element()
+                                        svg().path(format!("icons/{chevron}.svg")).size(px(12.)).text_color(theme.muted).into_any_element()
                                     } else {
                                         div().size(px(12.)).into_any_element()
                                     })
-                                    .child(svg().path(if entry.is_dir { "icons/folder.svg" } else { "icons/file.svg" }).size(px(13.)).text_color(if entry.is_dir { theme.faint } else { theme.accent.alpha(0.8) }))
+                                    .child(svg().path(if entry.is_dir { "icons/folder.svg" } else { "icons/file.svg" }).size(px(13.)).text_color(if open { theme.accent } else { theme.muted }))
                                     .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()));
                                 if entry.is_dir {
                                     row.child(
-                                        div()
-                                            .id(("new-file", ix))
-                                            .size(px(20.))
-                                            .rounded(px(5.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .hover(|this| this.bg(theme.raised))
+                                        Self::icon_button(("new-file", ix), "plus", "New note in this folder", 24., false, theme)
                                             .on_click(move |_, window, cx| {
                                                 cx.stop_propagation();
                                                 new_handle.update(cx, |ws, cx| ws.new_document_in(new_dir.clone(), window, cx));
-                                            })
-                                            .child(svg().path("icons/plus.svg").size(px(12.)).text_color(theme.faint)),
+                                            }),
                                     )
                                 } else {
                                     row.child(
                                         div()
-                                            .size(px(20.))
+                                            .size(px(24.))
+                                            .flex_shrink_0()
                                             .flex()
                                             .items_center()
                                             .justify_center()
@@ -1424,7 +1423,7 @@ impl Workspace {
             SidebarTab::Outline => {
                 let document: Rc<Document> = self.active_tab().map(|t| t.document.clone()).unwrap_or_default();
                 if document.headings.is_empty() {
-                    div().p(px(14.)).text_size(px(12.5)).text_color(theme.faint).child("Headings will appear here.").into_any_element()
+                    div().p(px(12.)).text_size(px(13.)).text_color(theme.muted).child("No headings yet").into_any_element()
                 } else {
                     let count = document.headings.len();
                     uniform_list("outline", count, move |range, _, _| {
@@ -1469,44 +1468,25 @@ impl Workspace {
             .border_color(theme.border)
             .child(match self.sidebar_tab {
                 SidebarTab::Outline => div()
-                    .h(px(38.))
-                    .px(px(14.))
+                    .h(px(36.))
+                    .px(px(12.))
                     .flex()
                     .items_center()
-                    .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted).child("Outline"))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted).child("Outline"))
                     .into_any_element(),
                 SidebarTab::Files => {
-                    let mut header = div().h(px(34.)).px(px(10.)).flex().items_center().gap(px(2.))
-                        .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted).child(root_name));
-                    header = header.child(
-                        div()
-                            .id("open-folder")
-                            .size(px(22.))
-                            .rounded(px(5.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|this| this.bg(theme.hover))
-                            .on_click(cx.listener(|this, _, window, cx| this.open_folder(&OpenFolder, window, cx)))
-                            .child(svg().path("icons/folder.svg").size(px(13.)).text_color(theme.faint)),
-                    );
-                    if let Some(dir) = root_dir {
-                        header = header.child(
-                            div()
-                                .id("new-file-root")
-                                .size(px(22.))
-                                .rounded(px(5.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .hover(|this| this.bg(theme.hover))
-                                .on_click(cx.listener(move |this, _, window, cx| this.new_document_in(dir.clone(), window, cx)))
-                                .child(svg().path("icons/plus.svg").size(px(12.)).text_color(theme.faint)),
-                        );
-                    }
-                    header.into_any_element()
+                    div()
+                        .h(px(36.))
+                        .px(px(12.))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted).child(root_name))
+                        .child(Self::icon_button("open-folder", "folder", "Open folder", 28., false, &theme).on_click(cx.listener(|this, _, window, cx| this.open_folder(&OpenFolder, window, cx))))
+                        .when_some(root_dir, |this, dir| {
+                            this.child(Self::icon_button("new-file-root", "plus", "New note in workspace", 28., false, &theme).on_click(cx.listener(move |this, _, window, cx| this.new_document_in(dir.clone(), window, cx))))
+                        })
+                        .into_any_element()
                 }
             })
             .child(
@@ -1586,10 +1566,10 @@ impl Workspace {
                     .items_center()
                     .gap(px(8.))
                     .child(input_box(&self.find_input, "search"))
-                    .child(div().w(px(70.)).text_size(px(12.)).text_color(theme.faint).child(status))
-                    .child(self.icon_button("find-prev", "arrow-up", "Previous", false, &theme).on_click(cx.listener(|this, _, window, cx| this.find_previous(&FindPrevious, window, cx))))
-                    .child(self.icon_button("find-next", "arrow-down", "Next", false, &theme).on_click(cx.listener(|this, _, window, cx| this.find_next(&FindNext, window, cx))))
-                    .child(self.icon_button("find-replace-toggle", "replace", "Replace", self.replace_visible, &theme).on_click(cx.listener(|this, _, window, cx| {
+                    .child(div().w(px(70.)).text_size(px(12.)).text_color(theme.muted).child(status))
+                    .child(Self::icon_button("find-prev", "arrow-up", "Previous match", 32., false, &theme).on_click(cx.listener(|this, _, window, cx| this.find_previous(&FindPrevious, window, cx))))
+                    .child(Self::icon_button("find-next", "arrow-down", "Next match", 32., false, &theme).on_click(cx.listener(|this, _, window, cx| this.find_next(&FindNext, window, cx))))
+                    .child(Self::icon_button("find-replace-toggle", "replace", "Toggle replace", 32., self.replace_visible, &theme).on_click(cx.listener(|this, _, window, cx| {
                         this.replace_visible = !this.replace_visible;
                         if this.replace_visible {
                             this.replace_input.update(cx, |input, cx| input.focus(window, cx));
@@ -1597,7 +1577,7 @@ impl Workspace {
                         cx.notify();
                     })))
                     .child(div().flex_1())
-                    .child(self.icon_button("find-close", "x", "Close", false, &theme).on_click(cx.listener(|this, _, window, cx| this.close_overlay(&CloseOverlay, window, cx)))),
+                    .child(Self::icon_button("find-close", "x", "Close find", 32., false, &theme).on_click(cx.listener(|this, _, window, cx| this.close_overlay(&CloseOverlay, window, cx)))),
             )
             .when(self.replace_visible, |this| {
                 this.child(
@@ -1635,11 +1615,12 @@ impl Workspace {
             .id(("preview", tab.id))
             .size_full()
             .overflow_y_scroll()
+            .restrict_scroll_to_axis()
             .track_scroll(&self.preview_scroll)
             .flex()
             .flex_col()
             .items_center()
-            .px(px(40.))
+            .px(px(if self.layout == Layout::Split { 16. } else { 40. }))
             .pt(px(28.))
             .pb(px(160.))
             .font_family(theme.sans.clone())
@@ -1687,23 +1668,23 @@ impl Workspace {
             crate::document::Newline::Cr => "CR",
             crate::document::Newline::Lf => "LF",
         });
-        let item = |text: String| div().child(text);
+        let item = |text: String| div().flex_shrink_0().whitespace_nowrap().child(text);
         div()
-            .h(px(26.))
+            .h(px(28.))
             .w_full()
             .flex()
             .items_center()
             .gap(px(16.))
-            .px(px(14.))
+            .px(px(12.))
             .bg(theme.shell)
             .border_t_1()
             .border_color(theme.border)
-            .text_size(px(11.5))
-            .text_color(theme.faint)
+            .text_size(px(12.))
+            .text_color(theme.muted)
             .child(item(position))
             .child(item(format!("{words} words")))
             .child(item(format!("{lines} lines")))
-            .child(div().flex_1().truncate().text_center().child(path))
+            .child(div().flex_1().min_w_0().truncate().text_center().child(path))
             .child(item(format!("UTF-8{}", newline.map(|n| format!(" · {n}")).unwrap_or_default())))
             .child(item(if self.wrap { "Wrap".to_owned() } else { "No wrap".to_owned() }))
     }
